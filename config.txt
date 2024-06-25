@@ -1,0 +1,4 @@
+
+ssh-keygen -t rsa; ssh-add; ssh-add -l; cat ~/.ssh/id_rsa.pub
+
+git clone https://github.com/saeeddhqan/dub-model; cd dub-model
