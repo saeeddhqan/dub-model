@@ -217,7 +217,7 @@ class ManageModel:
 
 
 	@torch.no_grad()
-	def calculate_loss(self) -> dict[str, int]:
+	def calculate_loss(self, step: int) -> dict[str, int]:
 		'''
 			We select eval_iterations chunks from both train and test data
 			and save their losses. All in all, evaluating the perf
@@ -239,9 +239,9 @@ class ManageModel:
 			losses = torch.zeros(config.eval_iterations)
 			for k in range(config.eval_iterations):
 				if split == 'train':
-					X, y = config.train_data_load.get_batch()
+					X, y = config.train_data_load.get_batch(step=-1)
 				else:
-					X, y = config.test_data_load.get_batch()
+					X, y = config.test_data_load.get_batch(step=-1)
 				with config.autocast:
 					_, loss = self.model(X, y)
 				losses[k] = loss.item()
@@ -263,12 +263,12 @@ class ManageModel:
 		'''
 		state = config.mode
 		config.mode = 'inference'
-		elapsed = self.generator()
+		elapsed = self.generator(epoch)
 
 		print('-' * 10)
 		print(f"[{epoch}] > Elapsed: {elapsed}")
 
-		self.loss = self.calculate_loss()
+		self.loss = self.calculate_loss(epoch)
 		test_loss = round(self.loss['test'].item(), 5)
 		train_loss = round(self.loss['train'].item(), 5)
 		test_pp = round(torch.exp(self.loss['test']).item(), 5)
@@ -375,7 +375,7 @@ class ManageModel:
 
 
 	@torch.no_grad()
-	def generator(self) -> tuple[float, float]:
+	def generator(self, step) -> tuple[float, float]:
 		'''
 			Generate a sequence with seq_len length and return it
 			along with time elapsed.
@@ -392,8 +392,8 @@ class ManageModel:
 		'''
 		self.pre_test()
 
-		X, _ = config.test_data_load.get_batch(batch_size=1)
-		X2, _ = config.train_data_load.get_batch(batch_size=1)
+		X, _ = config.test_data_load.get_batch(step=-1, batch_size=1)
+		X2, _ = config.train_data_load.get_batch(step=-1, batch_size=1)
 
 		start = time.time()
 
@@ -445,8 +445,8 @@ if __name__ == '__main__':
 			if config.load != '':
 				task.load_model(config.load)
 			else:
-				config.train_data_load = Data(config.train_dirpath, config.device, mode='train')
-				config.test_data_load = Data(config.test_dirpath, config.device, mode='test', augment=True)
+				config.train_data_load = Data(config.train_dirpath, config.device, mode='train', augment=False)
+				config.test_data_load = Data(config.test_dirpath, config.device, mode='test')
 				model.config = config
 				themodel = model.S2SModel()
 				task.model = torch.compile(themodel) if config.compile else themodel

@@ -4,6 +4,8 @@ import numpy as np
 import math, os, pathlib, random, argparse
 from contextlib import nullcontext
 from dataclasses import dataclass
+import subprocess
+import shutil
 
 import torch, torchaudio
 from torch import Tensor
@@ -100,8 +102,8 @@ params = {
 	'variation': 'voice', # When we change something, change this to distinguish different variations.
 	'workdir': 'workdir',
 	'load': '',
-	'train_dirpath': 'train_data_pairs',
-	'test_dirpath': 'test_data_pairs',
+	'train_dirpath': 'train_pairs',
+	'test_dirpath': 'test_pairs',
 	'action': 'train',
 	'mode': 'train',
 	'data_load': None,
@@ -119,7 +121,6 @@ params = {
 	'moe': True, # mixture of experts
 	'health': 2, # 0 for nothing, 1 for vector values, 2 for weight values of all layers
 	'layers_health': [],
-	'train_dir_path': 'train_data_pairs',
 	'n_codebooks': 8,
 }
 
@@ -384,66 +385,82 @@ class Data(torch.utils.data.Dataset):
 
 	def __init__(self, dir_path: Tensor, device: Union[str, torch.device], augment: bool = False, mode: str = 'train'):
 		self.device = device
+		self.mode = mode
+		self.batch_size = config.batch_size
+		self.dir_path = dir_path
+		self.datalen = 19000
+		self.offset = (torch.arange(8).view(-1, 1) * 1024)
+		self.augment = augment
+		self.dir_id = 0
+		self.epoch_id = 0
+		self.change_dir_after = 20
+		self.test_flag = True
+
+	def on_fly_load(self,
+			remote_user='ai',
+			remote_host='46.245.80.20',
+			local_dir='data_pairs',
+			remote_dir_id):
 		self.data_x1 = []
 		self.data_x2 = []
 		self.data_x3 = []
 		self.data_y1 = []
-		self.mode = mode
-		self.batch_size = config.batch_size
-		cond = lambda x: filename.startswith(self.mode)
-		for filename in os.listdir(dir_path):
-			if cond(filename):
-				fpath_input_voice = os.path.join(dir_path, filename)
-				fpath_output_voice = fpath_input_voice.replace('en_', 'pe_')
-				if not (os.path.isfile(fpath_input_voice)): # Check if it's a file (not a subdirectory)
-					continue
-				imel, iraw = get_mel_freqs(fpath_input_voice)
-				omel, oraw = get_mel_freqs(fpath_output_voice)
-				self.data_x2.append(iraw.unsqueeze(0))
-				self.data_x3.append(imel.unsqueeze(0))
-				self.data_y1.append(oraw.unsqueeze(0))
-				# self.data_y1.append(ocode.unsqueeze(0))
-		self.datalen = len(self.data_x1)
 
+		try:
+			if not os.path.exists(local_dir):
+				os.makedirs(local_dir)
+			else:
+				shutil.rmtree(local_dir)
 
-		self.offset = (torch.arange(8).view(-1, 1) * 1024)
+			scp_command1 = f"scp -r {remote_user}@{remote_host}:/home/ai/dataset_{remote_dir_id}/* {local_dir}"
+			result1 = subprocess.run(scp_command1, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+			# print(result1.stdout.decode())
+			if self.mode == 'train':
+				scp_command2 = f"scp -r {remote_user}@{remote_host}:/home/ai/dataset_{remote_dir_id + 1}/* {local_dir}"
+				result2 = subprocess.run(scp_command2, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+				# print(result2.stdout.decode())
+			print("Directory downloaded successfully")
+		except subprocess.CalledProcessError as e:
+			print(f"Error occurred: {e.stderr.decode()}")
+		for filename in os.listdir(self.dir_path):
+			fpath_input_voice = os.path.join(self.dir_path, filename)
+			fpath_output_voice = fpath_input_voice.replace('en_', 'pe_')
+			if not (os.path.isfile(fpath_input_voice)): # Check if it's a file (not a subdirectory)
+				continue
+			imel, iraw = get_mel_freqs(fpath_input_voice)
+			_, oraw = get_mel_freqs(fpath_output_voice)
+			self.data_x2.append(iraw.unsqueeze(0))
+			self.data_x3.append(imel.unsqueeze(0))
+			self.data_y1.append(oraw.unsqueeze(0))
 		with torch.no_grad():
 			# self.data_x1 = torch.cat(self.data_x1, dim=0)
 			self.data_x2 = torch.cat(self.data_x2, dim=0)
 			self.data_x3 = torch.cat(self.data_x3, dim=0)
 			self.data_x1 = get_codec(self.data_x2)
 			self.data_y1 = get_codec(self.data_y1)
-		self.augment = augment
+		self.datalen = len(self.data_x1)
+
 
 	def __len__(self):
 		return len(self.data_x)
 
 
-	def __getitem__(self, idx: int):
-		'''
-			Returns
-			-------
-			input_file: torch.Tensor, shape = (80, n_frames)
-				The log-Mel spectrogram of the audio segment
-
-			output_file_file: torch.Tensor, shape = (n_text_ctx,)
-				The encoded text sequence
-		
-			labels: torch.Tensor, shape = (n_text_ctx,)
-		'''
-		if torch.is_tensor(idx):
-			idx = idx.item()
-
-		return self.data_x[idx], self.data_y[idx]
-
-
 	def get_batch(self,
+		step: int,
 		batch_size: int = -1,
 	) -> tuple[Tensor, Tensor]:
 		batch_size = self.batch_size if batch_size == -1 else batch_size
+		if step % self.change_dir_after == 0 and self.test_flag and step != -1:
+			self.on_fly_load(local_dir=self.dir_path, remote_dir_id=self.dir_id if self.mode == 'train' else 'test')
+			self.dir_id += 1
+			if self.dir_id == self.max_dir_id:
+				self.dir_id = 0
+			if self.mode == 'test':
+				self.test_flag = False
+
 		ix = torch.randint(0, self.datalen, (batch_size,))
 		with torch.no_grad():
-			if self.augment:
+			if self.augment and self.mode == 'train':
 				x = [self.data_x1[ix] + self.offset, random_frequency_mask(self.data_x2[ix]), random_frequency_mask(self.data_x3[ix])]
 			else:
 				x = [self.data_x1[ix] + self.offset, self.data_x2[ix], self.data_x3[ix]]
