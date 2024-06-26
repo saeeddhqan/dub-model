@@ -346,7 +346,7 @@ def log_mel_spectrogram(
 
 def get_mel_freqs(
 	file_path: str,
-	no_mel: bool = False:
+	no_mel: bool = False,
 ):
 	if no_mel:
 		return None, pad(torchaudio.load(file_path)[0].view(1, 1, -1), target=480000)
