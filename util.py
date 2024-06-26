@@ -352,7 +352,7 @@ def get_mel_freqs(
 		return None, pad(torchaudio.load(file_path)[0].view(1, 1, -1), target=480000)
 	mel = log_mel_spectrogram(file_path, padding=mel_params.n_samples, device=config.device)
 	mel = pad_or_trim(mel, mel_params.n_frames)
-	return mel.unsqueeze(0), pad(torchaudio.load(file_path)[0], target=480000)
+	return mel.unsqueeze(0), pad(torchaudio.load(file_path)[0].view(1, 1, -1), target=480000)
 
 
 def random_frequency_mask(log_mels, freq_mask_prob=0.6, freq_mask_num_masks=2, freq_mask_max_percentage=0.1):
@@ -398,16 +398,20 @@ class Data(torch.utils.data.Dataset):
 		self.dir_id = 0
 		self.epoch_id = 0
 		self.change_dir_after = 50
+		self.max_dir_id = 20
 		self.test_flag = True
-		self.data_points = [os.path.join(self.dir_path, filename) for x in os.listdir(self.dir_path) if 'en_' in x]
+		self.data_points = [os.path.join(self.dir_path, x) for x in os.listdir(self.dir_path) if 'en_' in x]
 		self.datalen = len(self.data_points)
 
-	def on_fly_load(self, remote_dir_id):
+	def on_fly_load(self, dir_id):
+		if dir_id * 1024 >= self.datalen:
+			self.dir_id = 0
+			return
 		self.data_x1 = []
 		self.data_x2 = []
 		self.data_x3 = []
 		self.data_y1 = []
-
+		model.to('cuda')
 		with torch.no_grad():
 			for filename in self.data_points[dir_id * 1024: (dir_id * 1024) + 1024]:
 				fpath_output_voice = filename.replace('en_', 'pe_')
@@ -417,12 +421,17 @@ class Data(torch.utils.data.Dataset):
 				self.data_x3.append(imel)
 				self.data_y1.append(oraw)
 			self.data_x3 = torch.cat(self.data_x3, dim=0)
-			bsize_x = math.ceil(len(self.data_x2) / 20)
-			bsize_y = math.ceil(len(self.data_y1) / 20)
+			bsize_x = math.ceil(len(self.data_x2) / 16)
+			bsize_y = math.ceil(len(self.data_y1) / 16)
 
-			self.data_x1 = torch.cat([get_codec(self.data_x2[x*bsize_x: (x*bsize_x)+bsize_x]) for x in range(bsize_x)])
-			self.data_y1 = torch.cat([get_codec(self.data_y1[x*bsize_y: (x*bsize_y)+bsize_y]) for x in range(bsize_y)])
-			self.data_x2 = torch.cat(self.data_x2, dim=0)
+			self.data_x1 = torch.cat([get_codec(torch.cat(self.data_x2[x*bsize_x: (x*bsize_x)+bsize_x], dim=0)) for x in range(16)]).cpu()
+			self.data_y1 = torch.cat([get_codec(torch.cat(self.data_y1[x*bsize_y: (x*bsize_y)+bsize_y], dim=0)) for x in range(16)]).cpu()
+			self.data_x2 = torch.cat(self.data_x2, dim=0).cpu()
+			self.data_x1.to('cpu')
+			self.data_y1.to('cpu')
+			self.data_x2.to('cpu')
+
+		model.to('cpu')
 		self.datalen = len(self.data_x1)
 
 

@@ -129,14 +129,22 @@ class DVAEDecoder(nn.Module):
 
 
 class RMSNorm(nn.Module):
-	def __init__(self, dim: int):
+	def __init__(self, dim: int, no_mul: bool = False):
 		super().__init__()
-		self.scale = dim**-0.5
+		self.eps = 1e-6
 		self.gamma = nn.Parameter(torch.ones(dim))
 
 	def forward(self, x: Tensor) -> Tensor:
-		x = x / x.norm(p=2, dim=-1, keepdim=True)
-		return self.gamma / self.scale * x
+		return (x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)) * self.gamma
+
+
+class RMSNorm2(nn.Module):
+	def __init__(self, dim: int):
+		super().__init__()
+		self.eps = 1e-6
+
+	def forward(self, x: Tensor) -> Tensor:
+		return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
 
 class MHA(nn.Module):
@@ -270,7 +278,7 @@ class ToneBlocks(nn.Module):
 
 
 class BackgroundBlocks(nn.Module):
-	def __init__(self, dim, n_layers, signal_tokens: int = 500, moe: bool = True) -> NoReturn:
+	def __init__(self, dim, n_layers, signal_tokens: int = 1000, moe: bool = True) -> NoReturn:
 		super().__init__()
 		self.dim = dim
 		self.signal_tokens = signal_tokens
@@ -305,9 +313,9 @@ class MelEncoder(nn.Module):
 		# self.conv1 = nn.Conv1d(n_mels, n_state, kernel_size=3, padding=1)
 		# self.conv2 = nn.Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
 		# self.dropout = nn.Dropout(0.2)
-		self.convs = DVAEDecoder(idim=80, odim=80, n_layer=4, bn_dim=80, hidden=80, kernel=7, dilation=2, dim=1000)
+		self.convs = DVAEDecoder(idim=n_mels, odim=n_mels, n_layer=n_layers, bn_dim=n_mels, hidden=n_mels, kernel=7, dilation=2, dim=2000)
 		self.blocks = nn.ModuleList([TransformerBlock(self.dim, cross=False, moe=moe) for _ in range(n_layers)])
-		self.downsample = nn.Linear(1000, self.dim, bias=False)
+		self.downsample = nn.Linear(2000, self.dim, bias=False)
 		self.ln_post = RMSNorm(self.dim)
 		self.alpha = 0.5
 
@@ -361,10 +369,11 @@ class S2SModel(nn.Module):
 		])
 		self.embs = nn.Embedding(self.in_token_size * 8, self.dim)
 
-		self.translate = TranslateBlocks(self.dim, n_layers=4, cross=True, moe=False)
+		self.translate = TranslateBlocks(self.dim, n_layers=4, cross=False, moe=False)
 		self.tune_tone = ToneBlocks(self.dim, n_layers=2, moe=False)
 		self.add_background = BackgroundBlocks(self.dim, n_layers=2, moe=False)
 		self.signal_upsample = nn.Linear(480, 512, bias=False)
+		self.signal_norm = RMSNorm2(self.dim)
 		self.ln_res = RMSNorm(self.dim)
 		self.head = [nn.Linear(self.dim, self.in_token_size, bias=False).to(config.device) for _ in range(8)]
 
@@ -415,7 +424,7 @@ class S2SModel(nn.Module):
 		loss = None
 		predictions = []
 		seq = seq.view(B, T, C, -1)
-		signal = self.signal_upsample(signal.view(B, 500, 480))
+		signal = F.silu(self.signal_norm(self.signal_upsample(signal.view(B, 1000, 480)))  * self.alpha)
 		for i in range(8):
 			logits, aux_loss = self.translate(seq[:,i], mel1, aux_loss)
 			logits, aux_loss = self.tune_tone(logits, mel2, aux_loss)
