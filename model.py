@@ -9,7 +9,6 @@ from typing import NoReturn, ClassVar, Union, Optional, Tuple
 from flash_attn import flash_attn_func, flash_attn_qkvpacked_func
 from flash_attn.layers.rotary import RotaryEmbedding
 from util import config, mel_params
-from accelerators.activations import cgelu
 from timm.models.layers import trunc_normal_
 from mamba_ssm import Mamba2
 

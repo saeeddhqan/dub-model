@@ -2,3 +2,4 @@
 ssh-keygen -t rsa; ssh-add; ssh-add -l; cat ~/.ssh/id_rsa.pub
 
 git clone https://github.com/saeeddhqan/dub-model; cd dub-model
+ssh-keygen -t rsa; ssh-copy-id ai@46.245.80.20; ssh ai@46.245.80.20

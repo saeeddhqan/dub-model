@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 import subprocess
 import shutil
+from subprocess import CalledProcessError, run
 
 import torch, torchaudio
 from torch import Tensor
@@ -17,7 +18,7 @@ SAMPLE_RATE = 16000
 N_FFT = 400 # win length you might call.
 N_MELS = 80
 HOP_LENGTH = 160
-CHUNK_LENGTH = 10 # max length of audio input
+CHUNK_LENGTH = 20 # max length of audio input
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 192000 samples in a 12-second chunk
 N_FRAMES = N_SAMPLES // HOP_LENGTH  # 3000 frames in a mel spectrogram input
 
@@ -93,7 +94,7 @@ params = {
 	'nheads': 6,
 	'accumulation_steps': 2,
 	'dropout': 0.1,
-	'voice_duration': 10.23,
+	'voice_duration': 20,
 	'sample_rate': 24000,
 	'weight_decay': 0.0,
 	'grad_clip': 1.0,
@@ -258,8 +259,7 @@ def get_codec(waveform):
 	return encoded.squeeze(0)
 
 
-def load_audio(file: str, sr: int = params.sample_rate):
-
+def load_audio(file: str, sr: int = mel_params.sample_rate):
 	cmd = [
 		'ffmpeg',
 		'-nostdin',
@@ -279,7 +279,8 @@ def load_audio(file: str, sr: int = params.sample_rate):
 
 	return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
-def pad_or_trim(array, length: int = params.n_samples, *, axis: int = -1):
+
+def pad_or_trim(array, length: int = mel_params.n_samples, *, axis: int = -1):
 	if torch.is_tensor(array):
 		if array.shape[axis] > length:
 			array = array.index_select(
@@ -303,7 +304,7 @@ def pad_or_trim(array, length: int = params.n_samples, *, axis: int = -1):
 
 
 @lru_cache(maxsize=None)
-def mel_filters(device, n_mels: int = params.n_mels) -> torch.Tensor:
+def mel_filters(device, n_mels: int = mel_params.n_mels) -> torch.Tensor:
 	assert n_mels == 80, f"Unsupported n_mels: {n_mels}"
 	with np.load(
 		os.path.join(os.path.dirname(__file__), 'assets', 'mel_filters.npz')
@@ -313,7 +314,7 @@ def mel_filters(device, n_mels: int = params.n_mels) -> torch.Tensor:
 
 def log_mel_spectrogram(
 	audio: Union[str, np.ndarray, torch.Tensor],
-	n_mels: int = params.n_mels,
+	n_mels: int = mel_params.n_mels,
 	padding: int = 0,
 	device: Optional[Union[str, torch.device]] = None,
 ):
@@ -330,8 +331,8 @@ def log_mel_spectrogram(
 	# if padding > 0:
 	# 	audio = F.pad(audio, (0, padding))
 
-	window = torch.hann_window(params.n_fft).to(audio.device)
-	stft = torch.stft(audio, params.n_fft, params.hop_length, window=window, return_complex=True)
+	window = torch.hann_window(mel_params.n_fft).to(audio.device)
+	stft = torch.stft(audio, mel_params.n_fft, mel_params.hop_length, window=window, return_complex=True)
 	magnitudes = stft[..., :-1].abs() ** 2
 
 	filters = mel_filters(audio.device, n_mels)
@@ -340,16 +341,18 @@ def log_mel_spectrogram(
 	log_spec = torch.clamp(mel_spec, min=1e-10).log10()
 	log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
 	log_spec = (log_spec + 4.0) / 4.0
-	return log_spec, audio
+	return log_spec
 
 
 def get_mel_freqs(
 	file_path: str,
-	device: Union[str, torch.device],
+	no_mel: bool = False:
 ):
-	mel, freqs = log_mel_spectrogram(file_path, padding=params.n_samples, device=device)
-	mel = pad_or_trim(mel, params.n_frames)
-	return mel, freqs
+	if no_mel:
+		return None, pad(torchaudio.load(file_path)[0].view(1, 1, -1), target=480000)
+	mel = log_mel_spectrogram(file_path, padding=mel_params.n_samples, device=config.device)
+	mel = pad_or_trim(mel, mel_params.n_frames)
+	return mel.unsqueeze(0), pad(torchaudio.load(file_path)[0], target=480000)
 
 
 def random_frequency_mask(log_mels, freq_mask_prob=0.6, freq_mask_num_masks=2, freq_mask_max_percentage=0.1):
@@ -368,10 +371,10 @@ def random_frequency_mask(log_mels, freq_mask_prob=0.6, freq_mask_num_masks=2, f
 
 
 def pad(waves, target=750):
-	if waves.size(1) > 750:
-		waves = waves[:, :target]
-	elif waves.size(1) < target:
-		waves = F.pad(waves, (0, target - waves.size(1)))
+	if waves.size(-1) > target:
+		waves = waves[:, :, :target]
+	elif waves.size(-1) < target:
+		waves = F.pad(waves, (0, target - waves.size(-1)))
 	return waves
 
 
@@ -393,51 +396,51 @@ class Data(torch.utils.data.Dataset):
 		self.augment = augment
 		self.dir_id = 0
 		self.epoch_id = 0
-		self.change_dir_after = 20
+		self.change_dir_after = 50
 		self.test_flag = True
 
 	def on_fly_load(self,
+			remote_dir_id,
 			remote_user='ai',
 			remote_host='46.245.80.20',
-			local_dir='data_pairs',
-			remote_dir_id):
+			local_dir='train_pairs'):
 		self.data_x1 = []
 		self.data_x2 = []
 		self.data_x3 = []
 		self.data_y1 = []
 
 		try:
-			if not os.path.exists(local_dir):
-				os.makedirs(local_dir)
-			else:
+			if os.path.exists(local_dir):
 				shutil.rmtree(local_dir)
+			os.makedirs(local_dir)
 
-			scp_command1 = f"scp -r {remote_user}@{remote_host}:/home/ai/dataset_{remote_dir_id}/* {local_dir}"
+			scp_command1 = f"scp -r {remote_user}@{remote_host}:/home/ai/dataset_{remote_dir_id}.tar.xz ."
 			result1 = subprocess.run(scp_command1, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-			# print(result1.stdout.decode())
-			if self.mode == 'train':
-				scp_command2 = f"scp -r {remote_user}@{remote_host}:/home/ai/dataset_{remote_dir_id + 1}/* {local_dir}"
-				result2 = subprocess.run(scp_command2, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-				# print(result2.stdout.decode())
+			subprocess.run(f'tar -xJf dataset_{remote_dir_id}.tar.xz', shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+			subprocess.run(f'cp dataset_{remote_dir_id}/* {local_dir}', shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+			subprocess.run(f'rm dataset_{remote_dir_id}.tar.xz', shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+			subprocess.run(f'rm -r dataset_{remote_dir_id}', shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 			print("Directory downloaded successfully")
 		except subprocess.CalledProcessError as e:
 			print(f"Error occurred: {e.stderr.decode()}")
-		for filename in os.listdir(self.dir_path):
-			fpath_input_voice = os.path.join(self.dir_path, filename)
-			fpath_output_voice = fpath_input_voice.replace('en_', 'pe_')
-			if not (os.path.isfile(fpath_input_voice)): # Check if it's a file (not a subdirectory)
-				continue
-			imel, iraw = get_mel_freqs(fpath_input_voice)
-			_, oraw = get_mel_freqs(fpath_output_voice)
-			self.data_x2.append(iraw.unsqueeze(0))
-			self.data_x3.append(imel.unsqueeze(0))
-			self.data_y1.append(oraw.unsqueeze(0))
 		with torch.no_grad():
-			# self.data_x1 = torch.cat(self.data_x1, dim=0)
-			self.data_x2 = torch.cat(self.data_x2, dim=0)
+			for filename in os.listdir(self.dir_path):
+				fpath_input_voice = os.path.join(self.dir_path, filename)
+				fpath_output_voice = fpath_input_voice.replace('en_', 'pe_')
+				if not (os.path.isfile(fpath_input_voice)): # Check if it's a file (not a subdirectory)
+					continue
+				imel, iraw = get_mel_freqs(fpath_input_voice)
+				_, oraw = get_mel_freqs(fpath_output_voice, no_mel=True)
+				self.data_x2.append(iraw)
+				self.data_x3.append(imel)
+				self.data_y1.append(oraw)
 			self.data_x3 = torch.cat(self.data_x3, dim=0)
-			self.data_x1 = get_codec(self.data_x2)
-			self.data_y1 = get_codec(self.data_y1)
+			bsize_x = math.ceil(len(self.data_x2) / 20)
+			bsize_y = math.ceil(len(self.data_y1) / 20)
+
+			self.data_x1 = torch.cat([get_codec(self.data_x2[x*bsize_x: (x*bsize_x)+bsize_x]) for x in range(bsize_x)])
+			self.data_y1 = torch.cat([get_codec(self.data_y1[x*bsize_y: (x*bsize_y)+bsize_y]) for x in range(bsize_y)])
+			self.data_x2 = torch.cat(self.data_x2, dim=0)
 		self.datalen = len(self.data_x1)
 
 

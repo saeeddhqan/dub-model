@@ -308,7 +308,7 @@ class ManageModel:
 
 		epoch = 0
 
-		X, Y = config.train_data_load.get_batch()
+		X, Y = config.train_data_load.get_batch(epoch)
 		while True:
 			test_time = epoch % config.eval_step == config.eval_step - 1
 			lr = self.get_lr(epoch + 1) if config.decay_lr else config.lr
@@ -321,7 +321,7 @@ class ManageModel:
 				with config.autocast:
 					pred, loss = self.model(X, Y)
 					loss = loss / config.accumulation_steps
-				X, Y = config.train_data_load.get_batch()
+				X, Y = config.train_data_load.get_batch(epoch)
 				self.scaler.scale(loss).backward()
 
 
