@@ -3,5 +3,5 @@ pip install -r requirements.txt
 
 # wandb login
 
-mkdir -p train_pairs
-mkdir -p test_pairs
+cp ai@46.245.80.20:/home/ai/train_pairs.tar.xz .
+cp ai@46.245.80.20:/home/ai/test_pairs.tar.xz .

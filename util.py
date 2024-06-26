@@ -378,6 +378,7 @@ def pad(waves, target=750):
 	return waves
 
 
+
 class Data(torch.utils.data.Dataset):
 	'''
 		Load the data from the json file.
@@ -398,38 +399,19 @@ class Data(torch.utils.data.Dataset):
 		self.epoch_id = 0
 		self.change_dir_after = 50
 		self.test_flag = True
+		self.data_points = [os.path.join(self.dir_path, filename) for x in os.listdir(self.dir_path) if 'en_' in x]
+		self.datalen = len(self.data_points)
 
-	def on_fly_load(self,
-			remote_dir_id,
-			remote_user='ai',
-			remote_host='46.245.80.20',
-			local_dir='train_pairs'):
+	def on_fly_load(self, remote_dir_id):
 		self.data_x1 = []
 		self.data_x2 = []
 		self.data_x3 = []
 		self.data_y1 = []
 
-		try:
-			if os.path.exists(local_dir):
-				shutil.rmtree(local_dir)
-			os.makedirs(local_dir)
-
-			scp_command1 = f"scp -r {remote_user}@{remote_host}:/home/ai/dataset_{remote_dir_id}.tar.xz ."
-			result1 = subprocess.run(scp_command1, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-			subprocess.run(f'tar -xJf dataset_{remote_dir_id}.tar.xz', shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-			subprocess.run(f'cp dataset_{remote_dir_id}/* {local_dir}', shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-			subprocess.run(f'rm dataset_{remote_dir_id}.tar.xz', shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-			subprocess.run(f'rm -r dataset_{remote_dir_id}', shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-			print("Directory downloaded successfully")
-		except subprocess.CalledProcessError as e:
-			print(f"Error occurred: {e.stderr.decode()}")
 		with torch.no_grad():
-			for filename in os.listdir(self.dir_path):
-				fpath_input_voice = os.path.join(self.dir_path, filename)
-				fpath_output_voice = fpath_input_voice.replace('en_', 'pe_')
-				if not (os.path.isfile(fpath_input_voice)): # Check if it's a file (not a subdirectory)
-					continue
-				imel, iraw = get_mel_freqs(fpath_input_voice)
+			for filename in self.data_points[dir_id * 1024: (dir_id * 1024) + 1024]:
+				fpath_output_voice = filename.replace('en_', 'pe_')
+				imel, iraw = get_mel_freqs(filename)
 				_, oraw = get_mel_freqs(fpath_output_voice, no_mel=True)
 				self.data_x2.append(iraw)
 				self.data_x3.append(imel)
@@ -454,7 +436,7 @@ class Data(torch.utils.data.Dataset):
 	) -> tuple[Tensor, Tensor]:
 		batch_size = self.batch_size if batch_size == -1 else batch_size
 		if step % self.change_dir_after == 0 and self.test_flag and step != -1:
-			self.on_fly_load(local_dir=self.dir_path, remote_dir_id=self.dir_id if self.mode == 'train' else 'test')
+			self.on_fly_load(self.dir_id if self.mode == 'train' else 'test')
 			self.dir_id += 1
 			if self.dir_id == self.max_dir_id:
 				self.dir_id = 0
