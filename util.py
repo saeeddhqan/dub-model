@@ -81,7 +81,7 @@ params = {
 	'mqa_window_size': 256,
 	'mqa_head_dim': (dim // nheads),
 	'nheads': nheads,
-	'lr': 1e-3, # Learning rate
+	'lr': 7e-4, # Learning rate
 	'min_lr': 1e-4, # Min learning rate
 	'beta1': 0.9,
 	'beta2': 0.99, # The less, the more stable

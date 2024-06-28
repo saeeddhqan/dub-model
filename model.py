@@ -299,6 +299,33 @@ class BackgroundBlocks(nn.Module):
 		return self.ln2(x), aux_loss
 
 
+class SignalTower(nn.Module):
+	def __init__(self, dim_in: int, dim_out: int, n_layers, signal_tokens: int = 1000, moe: bool = True) -> NoReturn:
+		super().__init__()
+		self.dim_in = dim_in
+		self.dim_out = dim_out
+		self.signal_tokens = signal_tokens
+		self.dropout = nn.Dropout(config.dropout)
+		self.norm_in = RMSNorm2(dim_out)
+		self.norm_out = RMSNorm(self.dim)
+		self.blocks = nn.ModuleList([
+			TransformerBlock(self.dim, cross=False, moe=moe)
+			for idx in range(n_layers)
+		])
+		self.upsample = nn.Linear(dim_in, dim_out, bias=False)
+		self.signal_encode = DVAEDecoder(idim=signal_tokens, odim=signal_tokens, n_layer=12,
+			bn_dim=signal_tokens, hidden=signal_tokens, kernel=7, dilation=2, dim=dim_out)
+
+	def forward(self, x: Tensor, aux_loss: Tensor) -> Tensor:
+		x = self.upsample(self.dropout(x.view(B, self.signal_tokens, self.dim_in)))
+		x = self.norm_in(x)
+		x = self.signal_encode(x) # turn off this for experiment
+		for i, block in enumerate(self.blocks):
+			x, _, aux_loss = block(x, None, aux_loss)
+		return self.norm_out(x), aux_loss
+
+
+
 class MelEncoder(nn.Module):
 	def __init__(
 		self, n_mels: int, n_ctx: int, n_state: int,
@@ -310,9 +337,7 @@ class MelEncoder(nn.Module):
 		self.ln1 = RMSNorm(n_frames)
 		self.ln2 = RMSNorm(n_frames)
 		self.ln3 = RMSNorm(n_frames // 2)
-		# self.conv1 = nn.Conv1d(n_mels, n_state, kernel_size=3, padding=1)
-		# self.conv2 = nn.Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
-		# self.dropout = nn.Dropout(0.2)
+
 		self.convs = DVAEDecoder(idim=n_mels, odim=n_mels, n_layer=n_layers, bn_dim=n_mels, hidden=n_mels, kernel=7, dilation=2, dim=2000)
 		self.blocks = nn.ModuleList([TransformerBlock(self.dim, cross=False, moe=moe) for _ in range(n_layers)])
 		self.downsample = nn.Linear(2000, self.dim, bias=False)
@@ -340,6 +365,8 @@ class S2SModel(nn.Module):
 		self.moe = False
 		self.block_size = config.block_size
 		self.in_token_size = 1024
+		self.signal_tokens = 1000
+		self.signal_dim = 512
 		self.cross = config.cross
 		if self.cross:
 			self.translate_mel_encode = MelEncoder(
@@ -361,27 +388,24 @@ class S2SModel(nn.Module):
 			moe=False
 		)
 		self.mamba = nn.ModuleList([
-			Mamba2(d_model=self.dim, d_state=64, d_conv=4, expand=2).to(config.device)
+			Mamba2(d_model=self.dim, d_state=64, d_conv=4, expand=4).to(config.device)
 			for _ in range(8)
 		])
 
-		self.mamba_heads = nn.ModuleList([
+		self.mamba_translate = nn.ModuleList([
 			Mamba2(d_model=self.dim, d_state=64, d_conv=4, expand=2).to(config.device)
 			for _ in range(8)
 		])
 		self.embs = nn.Embedding(self.in_token_size * 8, self.dim)
 
-		self.translate = TranslateBlocks(self.dim, n_layers=config.nlayers, cross=config.cross, moe=config.moe)
-		self.tune_tone = ToneBlocks(self.dim, n_layers=2, moe=False)
-		self.add_background = BackgroundBlocks(self.dim, n_layers=2, moe=config.moe)
-		self.signal_upsample = nn.Linear(480, 512, bias=False)
-		self.signal_norm = RMSNorm2(self.dim)
+		self.signal_encode = SignalTower(dim_in=480, dim_out=self.signal_dim, n_layers=4, moe=True)
 		self.ln_res = RMSNorm(self.dim)
 		self.head = [nn.Linear(self.dim, self.in_token_size, bias=False).to(config.device) for _ in range(8)]
 
 		self.embs.weight = nn.Parameter(torch.cat([x.weight for x in self.head], dim=0))
 		# self.gaussian_noise = GaussianNoise()
 		self.drop = nn.Dropout(config.dropout)
+
 		self.count_params, self.wo_n_params = self.num_params()
 		config.parameters = self.count_params  / 1e6
 		print("Number of parameters: %.3fM, %.3fM" % (self.count_params  / 1e6, self.wo_n_params / 1e6))
@@ -408,31 +432,36 @@ class S2SModel(nn.Module):
 	def forward(self,
 		seq: Tensor,
 		y: Optional[Tensor] = None,
+		overfit_loss: Tensor = None,
 	) -> tuple[Tensor, Tensor]:
 
 		seq, signal, mel = seq
-		B, T, C = seq.shape
+		del mel
 
+		B, T, C = seq.shape
+		y = y.view(B, 12, 4000)
 		# signal = self.gaussian_noise(signal)
-		# mel = self.gaussian_noise(mel)
+
+		aux_loss = torch.tensor(data=0.0).to(seq.device)
+		signal, aux_loss = self.signal_encode(signal, aux_loss)
+
+
 		seq = self.drop(self.embs(seq.view(B, -1)))
 
-		seq = F.silu(self.ln_res(seq) * self.alpha)
+		seq = F.silu(self.ln_res(seq))
 		for f in self.mamba:
 			seq = f(seq)
-		aux_loss = torch.tensor(data=0.0).to(seq.device)
-		mel1, aux_loss = self.translate_mel_encode(mel, aux_loss) if self.cross else (None, aux_loss)
-		mel2, aux_loss = self.tone_mel_encode(mel, aux_loss)
+
+
 		loss = None
 		predictions = []
-		seq = seq.view(B, T, C, -1)
-		signal = F.silu(self.signal_norm(self.signal_upsample(signal.view(B, 1000, 480)))  * self.alpha)
-		for i in range(8):
-			logits, aux_loss = self.translate(seq[:,i], mel1, aux_loss)
-			logits, aux_loss = self.tune_tone(logits, mel2, aux_loss)
-			logits, aux_loss = self.add_background(logits, signal, aux_loss)
+		seq = seq.view(B, 12, 4000, -1)
+
+		for i in range(12):
+			for f in self.mamba_translate:
+				logits = f(torch.cat((signal, seq[:,i])))
 			if y is not None:
-				logits = self.head[i](self.mamba_heads[i](logits))
+				logits = self.head[i](logits)
 				predictions.append(torch.argmax(logits, dim=-1).unsqueeze(1))
 				layer_loss = F.cross_entropy(logits.view(-1, self.in_token_size), y[:, i].flatten())
 				if loss is None:
@@ -443,4 +472,4 @@ class S2SModel(nn.Module):
 				predictions.append(torch.argmax(self.head[i](self.mamba_heads[i](logits)), dim=-1).unsqueeze(1))
 		predictions = torch.cat(predictions, dim=1).view(B, T, C)
 
-		return predictions, (loss / 8) + (aux_loss / 8 if self.moe else 0) if loss else loss
+		return predictions, (loss / 8) + (aux_loss / 8 if self.moe else 0) + (overfit_loss if self.training else 0) if loss else loss

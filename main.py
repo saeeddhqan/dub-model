@@ -45,7 +45,6 @@ class ManageModel:
 
 		if epoch < warmup_iters:
 			return config.lr
-			# return lr * epoch / warmup_iters
 
 		if epoch > lr_decay_iters:
 			return config.min_lr
@@ -240,7 +239,7 @@ class ManageModel:
 				else:
 					X, y = config.test_data_load.get_batch(step=-1, batch_size=4)
 				with config.autocast:
-					_, loss = self.model(X, y)
+					_, loss = self.model(X, y, self.last_overfit)
 				losses[k] = loss.item()
 			out[split] = losses.mean()
 
@@ -268,6 +267,7 @@ class ManageModel:
 		self.loss = self.calculate_loss(epoch)
 		test_loss = round(self.loss['test'].item(), 5)
 		train_loss = round(self.loss['train'].item(), 5)
+		self.last_overfit = test_loss - train_loss
 		test_pp = round(torch.exp(self.loss['test']).item(), 5)
 		train_pp = round(torch.exp(self.loss['train']).item(), 5)
 		print(f"[{epoch}] > train: {train_loss}, {train_pp} PP, test: {test_loss}, {test_pp} PP")
@@ -304,7 +304,7 @@ class ManageModel:
 		'''
 
 		epoch = 0
-
+		self.last_overfit = torch.Tensor(data=0.0).to(config.device)
 		X, Y = config.train_data_load.get_batch(epoch)
 		while True:
 			test_time = epoch % config.eval_step == config.eval_step - 1
@@ -316,7 +316,7 @@ class ManageModel:
 			start = time.time()
 			for accum_step in range(config.accumulation_steps):
 				with config.autocast:
-					pred, loss = self.model(X, Y)
+					pred, loss = self.model(X, Y, self.last_overfit)
 					loss = loss / config.accumulation_steps
 				X, Y = config.train_data_load.get_batch(epoch)
 				self.scaler.scale(loss).backward()
