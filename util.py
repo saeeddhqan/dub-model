@@ -81,7 +81,7 @@ params = {
 	'mqa_window_size': 256,
 	'mqa_head_dim': (dim // nheads),
 	'nheads': nheads,
-	'lr': 6e-4, # Learning rate
+	'lr': 1e-3, # Learning rate
 	'min_lr': 1e-4, # Min learning rate
 	'beta1': 0.9,
 	'beta2': 0.99, # The less, the more stable
@@ -90,10 +90,10 @@ params = {
 	'iterations': 5001, # Like epochs
 	'eval_iterations': 25, # Do n step(s), and calculate loss.
 	'batch_size': 2,
-	'nlayers': 2,
+	'nlayers': 16,
 	'nheads': 6,
 	'accumulation_steps': 2,
-	'dropout': 0.1,
+	'dropout': 0.0,
 	'voice_duration': 20,
 	'sample_rate': 24000,
 	'weight_decay': 0.0,
@@ -119,7 +119,8 @@ params = {
 	'bias': False,
 	'topk': -1,
 	'token_type': 'token',
-	'moe': True, # mixture of experts
+	'moe': False, # mixture of experts
+	'cross': True,
 	'health': 2, # 0 for nothing, 1 for vector values, 2 for weight values of all layers
 	'layers_health': [],
 	'n_codebooks': 8,
@@ -404,16 +405,20 @@ class Data(torch.utils.data.Dataset):
 		self.datalen = len(self.data_points)
 
 	def on_fly_load(self, dir_id):
-		if dir_id * 1024 >= self.datalen:
-			self.dir_id = 0
-			return
+		if isinstance(dir_id, str):
+			dp = self.data_points
+		else:
+			if dir_id * 1024 >= self.datalen:
+				self.dir_id = 0
+				return
+			dp = self.data_points[dir_id * 1024: (dir_id * 1024) + 1024]
 		self.data_x1 = []
 		self.data_x2 = []
 		self.data_x3 = []
 		self.data_y1 = []
 		model.to('cuda')
 		with torch.no_grad():
-			for filename in self.data_points[dir_id * 1024: (dir_id * 1024) + 1024]:
+			for filename in dp:
 				fpath_output_voice = filename.replace('en_', 'pe_')
 				imel, iraw = get_mel_freqs(filename)
 				_, oraw = get_mel_freqs(fpath_output_voice, no_mel=True)
@@ -458,8 +463,8 @@ class Data(torch.utils.data.Dataset):
 				x = [self.data_x1[ix] + self.offset, random_frequency_mask(self.data_x2[ix]), random_frequency_mask(self.data_x3[ix])]
 			else:
 				x = [self.data_x1[ix] + self.offset, self.data_x2[ix], self.data_x3[ix]]
-			x = [i.pin_memory().to(config.device, non_blocking=True) for i in x]
-			y = self.data_y1[ix].pin_memory().to(config.device, non_blocking=True)
+			x = [i.to(config.device, non_blocking=True) for i in x]
+			y = self.data_y1[ix].to(config.device, non_blocking=True)
 		return (
 			x,
 			y,

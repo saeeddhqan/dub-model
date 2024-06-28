@@ -19,7 +19,7 @@ def set_seed(seed: int):
 	torch.manual_seed(seed)
 	torch.cuda.manual_seed(seed)
 	torch.cuda.manual_seed_all(seed)
-
+wandb.require("core")
 set_seed(1244)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -44,7 +44,7 @@ class ManageModel:
 	def get_lr(self, epoch, warmup_iters=100, lr_decay_iters=2000):
 
 		if epoch < warmup_iters:
-			return config.lr # no warmup
+			return config.lr
 			# return lr * epoch / warmup_iters
 
 		if epoch > lr_decay_iters:
@@ -152,11 +152,8 @@ class ManageModel:
 			)
 
 		ver = f'{config.variation}'
-
-		variation = f"{ver}_{config.nlayers}nl_\
-		{config.dim}d_{config.dropout}\
-		do_{config.block_size}bs_{config.lr}lr_{int(config.decay_lr)}\
-		dlr".strip().replace('\t', '').replace(' ', '')
+		
+		variation = f"{ver}_{config.nlayers}nl_{config.dim}d_{1 if config.cross else 0}cross_{1 if config.moe else 0}moe".strip().replace('\t', '').replace(' ', '')
 
 		if config.tensorboard:
 			self.tensorboard_writer = SummaryWriter(
@@ -165,7 +162,7 @@ class ManageModel:
 			)
 		if config.wandb:
 			self.wandb_init = wandb.init(
-				project='S2SModel',
+				project='dub-model',
 				name=variation,
 				config=config.get_model_params(),
 			)
@@ -239,9 +236,9 @@ class ManageModel:
 			losses = torch.zeros(config.eval_iterations)
 			for k in range(config.eval_iterations):
 				if split == 'train':
-					X, y = config.train_data_load.get_batch(step=-1)
+					X, y = config.train_data_load.get_batch(step=-1, batch_size=4)
 				else:
-					X, y = config.test_data_load.get_batch(step=-1)
+					X, y = config.test_data_load.get_batch(step=-1, batch_size=4)
 				with config.autocast:
 					_, loss = self.model(X, y)
 				losses[k] = loss.item()
@@ -426,14 +423,13 @@ if __name__ == '__main__':
 	parser.add_argument('--nlayers', '-nl', type=int, default=config.nlayers, help=f"number of blocks, default {config.nlayers}")
 	parser.add_argument('--dim', '-d', type=int, default=config.dim, help=f"embedding size, default {config.dim}")
 	parser.add_argument('--accumulation-steps', '-as', type=int, default=config.accumulation_steps, help=f"accumulation steps, default {config.accumulation_steps}")
-	parser.add_argument('--block-size', '-bs', type=int, default=config.block_size, help=f"length input sequence, default {config.block_size}")
 	parser.add_argument('--batch-size', '-b', type=int, default=config.batch_size, help=f"batch size, default {config.batch_size}")
-	parser.add_argument('--topk', type=int, default=config.topk, help=f"topk sampling, default {config.topk}")
 	parser.add_argument('--wandb', action='store_true', default=config.wandb, help=f"use wandb for visualization, default {config.wandb}")
 	parser.add_argument('--tensorboard', action='store_true', default=config.tensorboard, help=f"use tensorboard for visualization, default {config.tensorboard}")
 	parser.add_argument('--compile', action='store_true', default=config.compile, help=f"compile the model for faster training, default {config.compile}")
 	parser.add_argument('--decay-lr', action='store_true', default=config.decay_lr, help=f"decay learning rate, default {config.decay_lr}")
 	parser.add_argument('--moe', action='store_true', default=config.moe, help=f"mixture of experts, default {config.moe}")
+	parser.add_argument('--cross', action='store_true', default=config.cross, help=f"cross attention, default {config.cross}")
 	args = parser.parse_args()
 
 	config.set_args(args)
@@ -447,6 +443,7 @@ if __name__ == '__main__':
 			else:
 				config.train_data_load = Data(config.train_dirpath, config.device, mode='train', augment=False)
 				config.test_data_load = Data(config.test_dirpath, config.device, mode='test')
+				config.test_data_load.get_batch(0)
 				model.config = config
 				themodel = model.S2SModel()
 				task.model = torch.compile(themodel) if config.compile else themodel

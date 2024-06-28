@@ -289,7 +289,7 @@ class BackgroundBlocks(nn.Module):
 			TransformerBlock(self.dim, cross=True, moe=moe)
 			for idx in range(n_layers)
 		])
-		self.signal_encode = DVAEDecoder(idim=signal_tokens, odim=signal_tokens, n_layer=4, bn_dim=signal_tokens, hidden=signal_tokens, kernel=7, dilation=2, dim=dim)
+		self.signal_encode = DVAEDecoder(idim=signal_tokens, odim=signal_tokens, n_layer=6, bn_dim=signal_tokens, hidden=signal_tokens, kernel=7, dilation=2, dim=dim)
 
 	def forward(self, x: Tensor, signal: Tensor, aux_loss: Tensor) -> Tensor:
 		x = self.ln1(self.dropout(x))
@@ -340,27 +340,29 @@ class S2SModel(nn.Module):
 		self.moe = False
 		self.block_size = config.block_size
 		self.in_token_size = 1024
-		self.translate_mel_encode = MelEncoder(
-			mel_params.n_mels,
-			mel_params.n_audio_ctx,
-			mel_params.n_audio_state,
-			mel_params.n_audio_head,
-			4,
-			mel_params.n_frames, dim=self.dim,
-			moe=False
-		)
+		self.cross = config.cross
+		if self.cross:
+			self.translate_mel_encode = MelEncoder(
+				mel_params.n_mels,
+				mel_params.n_audio_ctx,
+				mel_params.n_audio_state,
+				mel_params.n_audio_head,
+				5,
+				mel_params.n_frames, dim=self.dim,
+				moe=False
+			)
 		self.tone_mel_encode = MelEncoder(
 			mel_params.n_mels,
 			mel_params.n_audio_ctx,
 			mel_params.n_audio_state,
 			mel_params.n_audio_head,
-			4,
+			5,
 			mel_params.n_frames, dim=self.dim,
 			moe=False
 		)
 		self.mamba = nn.ModuleList([
 			Mamba2(d_model=self.dim, d_state=64, d_conv=4, expand=2).to(config.device)
-			for _ in range(4)
+			for _ in range(8)
 		])
 
 		self.mamba_heads = nn.ModuleList([
@@ -369,20 +371,20 @@ class S2SModel(nn.Module):
 		])
 		self.embs = nn.Embedding(self.in_token_size * 8, self.dim)
 
-		self.translate = TranslateBlocks(self.dim, n_layers=4, cross=False, moe=False)
+		self.translate = TranslateBlocks(self.dim, n_layers=config.nlayers, cross=config.cross, moe=config.moe)
 		self.tune_tone = ToneBlocks(self.dim, n_layers=2, moe=False)
-		self.add_background = BackgroundBlocks(self.dim, n_layers=2, moe=False)
+		self.add_background = BackgroundBlocks(self.dim, n_layers=2, moe=config.moe)
 		self.signal_upsample = nn.Linear(480, 512, bias=False)
 		self.signal_norm = RMSNorm2(self.dim)
 		self.ln_res = RMSNorm(self.dim)
 		self.head = [nn.Linear(self.dim, self.in_token_size, bias=False).to(config.device) for _ in range(8)]
 
 		self.embs.weight = nn.Parameter(torch.cat([x.weight for x in self.head], dim=0))
-		self.gaussian_noise = GaussianNoise()
-		self.drop = nn.Dropout(0.1)
+		# self.gaussian_noise = GaussianNoise()
+		self.drop = nn.Dropout(config.dropout)
 		self.count_params, self.wo_n_params = self.num_params()
 		config.parameters = self.count_params  / 1e6
-		print("Number of parameters: %.3fM, %.3fM" % (self.count_params  / 1e6,self.wo_n_params / 1e6))
+		print("Number of parameters: %.3fM, %.3fM" % (self.count_params  / 1e6, self.wo_n_params / 1e6))
 		self.alpha = 0.5
 		self.apply(self.norm_weights)
 
@@ -411,15 +413,15 @@ class S2SModel(nn.Module):
 		seq, signal, mel = seq
 		B, T, C = seq.shape
 
-		signal = self.gaussian_noise(signal)
-		mel = self.gaussian_noise(mel)
+		# signal = self.gaussian_noise(signal)
+		# mel = self.gaussian_noise(mel)
 		seq = self.drop(self.embs(seq.view(B, -1)))
 
 		seq = F.silu(self.ln_res(seq) * self.alpha)
 		for f in self.mamba:
 			seq = f(seq)
 		aux_loss = torch.tensor(data=0.0).to(seq.device)
-		mel1, aux_loss = self.translate_mel_encode(mel, aux_loss)
+		mel1, aux_loss = self.translate_mel_encode(mel, aux_loss) if self.cross else (None, aux_loss)
 		mel2, aux_loss = self.tone_mel_encode(mel, aux_loss)
 		loss = None
 		predictions = []
